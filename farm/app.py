@@ -5,13 +5,13 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import db
-from .config import BASE_DIR, UPLOAD_DIR, DEFAULT_MOONRAKER_PORT
+from . import ai, db
+from .config import BASE_DIR, UPLOAD_DIR, DEFAULT_MOONRAKER_PORT, AI_TOKEN, AI_MAX_IMAGE_MB
 from .discovery import scan_network
 from .manager import manager
 
@@ -24,7 +24,9 @@ STATIC_DIR = BASE_DIR / "static"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await manager.start()
+    ai.detector = ai.AIDetector(manager.http)
     yield
+    ai.detector = None
     await manager.stop()
 
 
@@ -39,6 +41,8 @@ class PrinterIn(BaseModel):
     port: int = DEFAULT_MOONRAKER_PORT
     api_key: str = ""
     notes: str = ""
+    shelf_id: str | None = None
+    position: int | None = None
 
 
 class PrinterPatch(BaseModel):
@@ -61,6 +65,32 @@ class PrintIn(BaseModel):
 class DiscoverIn(BaseModel):
     cidr: str = "192.168.1.0/24"
     port: int = DEFAULT_MOONRAKER_PORT
+
+
+class FarmIn(BaseModel):
+    name: str = Field(min_length=1)
+    notes: str = ""
+
+
+class FarmPatch(BaseModel):
+    name: str | None = None
+    notes: str | None = None
+
+
+class ShelfIn(BaseModel):
+    name: str = Field(min_length=1)
+    slots: int = Field(default=4, ge=1, le=200)
+
+
+class ShelfPatch(BaseModel):
+    name: str | None = None
+    slots: int | None = Field(default=None, ge=1, le=200)
+    farm_id: str | None = None
+
+
+class LocationIn(BaseModel):
+    shelf_id: str | None = None
+    position: int | None = None
 
 
 def _printer_or_404(pid: str) -> dict:
@@ -87,6 +117,23 @@ def _safe_gcode_name(name: str) -> str:
     return name
 
 
+def _validate_location(shelf_id: str | None, position: int | None, pid: str | None = None):
+    """ตรวจตำแหน่งที่จะวางเครื่อง: ชั้นมีจริง, ช่องในช่วง, ไม่ซ้ำกับเครื่องอื่น"""
+    if shelf_id is None:
+        return None, None
+    shelf = db.get_shelf(shelf_id)
+    if not shelf:
+        raise HTTPException(404, "ไม่พบชั้นวางนี้")
+    if position is None:
+        raise HTTPException(400, "ระบุหมายเลขช่องบนชั้นวางด้วย")
+    if not 1 <= position <= shelf["slots"]:
+        raise HTTPException(400, f"ชั้นวางนี้มี {shelf['slots']} ช่อง (ระบุได้ 1-{shelf['slots']})")
+    occupant = db.printer_at(shelf_id, position)
+    if occupant and occupant["id"] != pid:
+        raise HTTPException(409, f"ช่อง {position} ถูกใช้โดย \"{occupant['name']}\" อยู่แล้ว")
+    return shelf_id, position
+
+
 # ---------------- state ----------------
 
 @app.get("/api/state")
@@ -100,7 +147,10 @@ async def get_state():
     jobs = db.list_jobs()
     for j in jobs:
         j.pop("stored_path", None)
-    return {"printers": printers, "jobs": jobs, "server_time": time.time()}
+    farms = db.list_farms()
+    for f in farms:
+        f["shelves"] = db.list_shelves(f["id"])
+    return {"printers": printers, "jobs": jobs, "farms": farms, "server_time": time.time()}
 
 
 # ---------------- printers ----------------
@@ -114,6 +164,10 @@ async def add_printer(body: PrinterIn):
     except Exception as e:
         raise HTTPException(502, f"เชื่อมต่อ Moonraker ที่ {body.host}:{body.port} ไม่ได้: {e}")
     p = db.add_printer(body.name, body.host, body.port, body.api_key, body.notes)
+    if body.shelf_id is not None:
+        shelf_id, position = _validate_location(body.shelf_id, body.position, p["id"])
+        db.set_printer_location(p["id"], shelf_id, position)
+        p = db.get_printer(p["id"])
     return {"ok": True, "printer": p, "moonraker_version": info.get("moonraker_version")}
 
 
@@ -138,6 +192,15 @@ async def printer_clear(pid: str):
     db.update_printer(pid, waiting_clear=0)
     log.info("printer %s cleared — ready for next job", pid)
     return {"ok": True}
+
+
+@app.put("/api/printers/{pid}/location")
+async def printer_location(pid: str, body: LocationIn):
+    """วางเครื่องลงช่องบนชั้นวาง (shelf_id=null = เอาออกจากผัง)"""
+    _printer_or_404(pid)
+    shelf_id, position = _validate_location(body.shelf_id, body.position, pid)
+    db.set_printer_location(pid, shelf_id, position)
+    return {"ok": True, "printer": db.get_printer(pid)}
 
 
 @app.get("/api/printers/{pid}/files")
@@ -244,6 +307,94 @@ async def requeue_job(jid: str):
         raise HTTPException(400, "requeue ได้เฉพาะงานที่จบแล้ว (done/failed/canceled)")
     db.update_job(jid, status="queued", printer_id=None, error="", started_at=None, finished_at=None)
     return {"ok": True}
+
+
+# ---------------- farm layout (farm -> shelf -> ตำแหน่งเครื่อง) ----------------
+
+@app.post("/api/farms")
+async def add_farm(body: FarmIn):
+    return {"ok": True, "farm": db.add_farm(body.name.strip(), body.notes)}
+
+
+@app.patch("/api/farms/{fid}")
+async def patch_farm(fid: str, body: FarmPatch):
+    if not db.get_farm(fid):
+        raise HTTPException(404, "ไม่พบฟาร์มนี้")
+    db.update_farm(fid, **body.model_dump(exclude_none=True))
+    return {"ok": True, "farm": db.get_farm(fid)}
+
+
+@app.delete("/api/farms/{fid}")
+async def remove_farm(fid: str):
+    if not db.get_farm(fid):
+        raise HTTPException(404, "ไม่พบฟาร์มนี้")
+    db.delete_farm(fid)  # ชั้นวางถูกลบ, เครื่องพิมพ์แค่หลุดจากผัง
+    return {"ok": True}
+
+
+@app.post("/api/farms/{fid}/shelves")
+async def add_shelf(fid: str, body: ShelfIn):
+    if not db.get_farm(fid):
+        raise HTTPException(404, "ไม่พบฟาร์มนี้")
+    return {"ok": True, "shelf": db.add_shelf(fid, body.name.strip(), body.slots)}
+
+
+@app.patch("/api/shelves/{sid}")
+async def patch_shelf(sid: str, body: ShelfPatch):
+    shelf = db.get_shelf(sid)
+    if not shelf:
+        raise HTTPException(404, "ไม่พบชั้นวางนี้")
+    fields = body.model_dump(exclude_none=True)
+    if "farm_id" in fields and not db.get_farm(fields["farm_id"]):
+        raise HTTPException(404, "ไม่พบฟาร์มปลายทาง")
+    if "slots" in fields:
+        occupied = db.max_occupied_position(sid)
+        if fields["slots"] < occupied:
+            raise HTTPException(400, f"ลดจำนวนช่องไม่ได้ — มีเครื่องวางอยู่ถึงช่อง {occupied}")
+    db.update_shelf(sid, **fields)
+    return {"ok": True, "shelf": db.get_shelf(sid)}
+
+
+@app.delete("/api/shelves/{sid}")
+async def remove_shelf(sid: str):
+    if not db.get_shelf(sid):
+        raise HTTPException(404, "ไม่พบชั้นวางนี้")
+    db.delete_shelf(sid)  # เครื่องบนชั้นแค่หลุดจากผัง ไม่ถูกลบ
+    return {"ok": True}
+
+
+# ---------------- AI failure detection ----------------
+
+@app.post("/api/ai/detect")
+async def ai_detect(request: Request, image: UploadFile = File(...)):
+    """รับภาพจากปลั๊กอิน klipper-ai-failure-detection -> คืน failure probability
+
+    ปลั๊กอินตั้ง api_url มาที่นี่ เช่น http://<farm-server>:8000/api/ai/detect
+    """
+    if AI_TOKEN and request.headers.get("authorization", "") != f"Bearer {AI_TOKEN}":
+        raise HTTPException(401, "token ไม่ถูกต้อง (ตั้ง api_key ในปลั๊กอินให้ตรงกัน)")
+    data = await image.read()
+    if not data:
+        raise HTTPException(400, "ไม่พบข้อมูลภาพ")
+    if len(data) > AI_MAX_IMAGE_MB * 1024 * 1024:
+        raise HTTPException(413, f"ภาพใหญ่เกิน {AI_MAX_IMAGE_MB:.0f} MB")
+    if ai.detector is None:
+        raise HTTPException(503, "AI service ยังไม่พร้อม")
+    try:
+        result = await ai.detector.detect(data, image.content_type or "image/jpeg")
+    except ai.AIError as e:
+        raise HTTPException(503, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"เรียก AI backend ไม่สำเร็จ: {e}")
+    return {"ok": True, **result}
+
+
+@app.get("/api/ai/status")
+async def ai_status():
+    s = ai.status()
+    s["token_required"] = bool(AI_TOKEN)
+    s["stats"] = ai.detector.stats if ai.detector else None
+    return s
 
 
 # ---------------- discovery ----------------

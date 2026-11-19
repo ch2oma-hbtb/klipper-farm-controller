@@ -1,5 +1,5 @@
 /* Klipper Farm Controller — dashboard */
-let state = { printers: [], jobs: [] };
+let state = { printers: [], jobs: [], farms: [] };
 let currentPrinterId = null;
 
 const $ = (id) => document.getElementById(id);
@@ -71,6 +71,7 @@ function printerState(p) {
 }
 
 function render() {
+  renderLayout();
   renderPrinters();
   renderJobs();
   renderSummary();
@@ -111,6 +112,7 @@ function renderPrinters() {
     const st = printerState(p);
     const live = p.live || {};
     const online = live.online;
+    const loc = locationLabel(p);
     const prog = live.progress ?? 0;
     const ex = live.extruder || {}, bed = live.heater_bed || {};
     const temp = (t) => t?.temp != null ? `${Math.round(t.temp)}°/${Math.round(t.target || 0)}°` : "–";
@@ -122,6 +124,7 @@ function renderPrinters() {
         <div>
           <div class="card-name">${esc(p.name)}</div>
           <div class="card-host">${esc(p.host)}:${p.port}${p.notes ? " · " + esc(p.notes) : ""}</div>
+          ${loc ? `<div class="card-loc">${esc(loc)}</div>` : ""}
         </div>
         <span class="state ${st.cls}">${st.label}</span>
       </div>
@@ -241,6 +244,7 @@ function openPrinter(pid) {
   $("pp-title").textContent = `${p.name} (${p.host}:${p.port})`;
   $("pp-gcode-out").classList.add("hidden");
   $("pp-clear").classList.toggle("hidden", !p.waiting_clear);
+  ppInitLocation(p);
   $("modal-printer").classList.remove("hidden");
   loadPrinterFiles();
 }
@@ -351,4 +355,230 @@ async function requeueJob(jid) {
     toast("นำเข้าคิวใหม่แล้ว");
     refresh();
   } catch (e) { toast(e.message, "err"); }
+}
+
+// ---------- farm layout (farm -> shelf -> ช่อง) ----------
+const STATUS_COLOR = {
+  "st-printing": "#4da3ff", "st-idle": "#35c46f", "st-paused": "#f0b429",
+  "st-error": "#ef5350", "st-offline": "#ef5350", "st-other": "#6b7688", "st-waiting": "#ff8a3c",
+};
+const farmById = (fid) => (state.farms || []).find((f) => f.id === fid);
+function shelfById(sid) {
+  for (const f of state.farms || []) {
+    const s = (f.shelves || []).find((x) => x.id === sid);
+    if (s) return s;
+  }
+  return null;
+}
+function locationLabel(p) {
+  if (!p.shelf_id) return "";
+  const shelf = shelfById(p.shelf_id);
+  if (!shelf) return "";
+  const farm = farmById(shelf.farm_id);
+  return `📍 ${farm?.name || "?"} · ${shelf.name} · ช่อง ${p.position}`;
+}
+
+function renderLayout() {
+  const farms = state.farms || [];
+  $("no-farms").classList.toggle("hidden", farms.length > 0);
+  $("farms").innerHTML = farms.map((f) => `
+    <div class="farm-panel">
+      <div class="farm-head">
+        <div><b>🏭 ${esc(f.name)}</b>${f.notes ? ` <span class="farm-notes">${esc(f.notes)}</span>` : ""}</div>
+        <div class="farm-actions">
+          <button class="btn small" onclick="openShelfModal('${f.id}')">＋ ชั้นวาง</button>
+          <button class="btn small" onclick="openFarmModal('${f.id}')">✏️</button>
+          <button class="btn small danger-outline" onclick="deleteFarm('${f.id}')">🗑</button>
+        </div>
+      </div>
+      ${(f.shelves || []).length
+        ? f.shelves.map((s) => renderShelf(f, s)).join("")
+        : `<p class="empty small-empty">ยังไม่มีชั้นวาง — กด "＋ ชั้นวาง"</p>`}
+    </div>`).join("");
+}
+
+function renderShelf(f, s) {
+  const slots = [];
+  for (let pos = 1; pos <= s.slots; pos++) {
+    const p = state.printers.find((x) => x.shelf_id === s.id && x.position === pos);
+    if (p) {
+      const st = printerState(p);
+      const color = STATUS_COLOR[st.cls] || "#6b7688";
+      slots.push(`
+        <div class="slot filled" onclick="openPrinter('${p.id}')" title="${esc(p.name)} — ${st.label}">
+          <span class="slot-num">${pos}</span>
+          <span class="slot-name"><span class="dot" style="background:${color}"></span>${esc(p.name)}</span>
+          <span class="slot-state">${st.label}</span>
+        </div>`);
+    } else {
+      slots.push(`
+        <div class="slot empty-slot" onclick="openAssign('${s.id}',${pos})" title="วางเครื่องพิมพ์ลงช่อง ${pos}">
+          <span class="slot-num">${pos}</span><span class="slot-plus">＋ ว่าง</span>
+        </div>`);
+    }
+  }
+  return `
+    <div class="shelf">
+      <div class="shelf-head">
+        <span>🗄 ${esc(s.name)} <small>(${s.slots} ช่อง)</small></span>
+        <span class="shelf-actions">
+          <button class="btn small" onclick="openShelfModal('${f.id}','${s.id}')">✏️</button>
+          <button class="btn small danger-outline" onclick="deleteShelf('${s.id}')">🗑</button>
+        </span>
+      </div>
+      <div class="slots">${slots.join("")}</div>
+    </div>`;
+}
+
+// ---------- farm / shelf modals ----------
+let editFarmId = null, editShelfId = null, shelfFarmId = null, assignTarget = null;
+
+function openFarmModal(fid = null) {
+  editFarmId = fid;
+  const f = fid ? farmById(fid) : null;
+  $("farm-title").textContent = f ? "แก้ไขฟาร์ม" : "สร้างฟาร์ม";
+  $("farm-name").value = f?.name || "";
+  $("farm-notes").value = f?.notes || "";
+  $("modal-farm").classList.remove("hidden");
+  $("farm-name").focus();
+}
+
+async function saveFarm() {
+  const name = $("farm-name").value.trim();
+  if (!name) return toast("กรอกชื่อฟาร์มก่อน", "err");
+  const body = { name, notes: $("farm-notes").value.trim() };
+  try {
+    if (editFarmId) await postJSON(`/api/farms/${editFarmId}`, body, "PATCH");
+    else await postJSON("/api/farms", body);
+    toast("บันทึกฟาร์มแล้ว");
+    closeModals();
+    refresh();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function deleteFarm(fid) {
+  const f = farmById(fid);
+  if (!confirm(`ลบฟาร์ม "${f?.name || fid}" และชั้นวางทั้งหมด?\nเครื่องพิมพ์จะไม่ถูกลบ แต่จะหลุดจากผัง`)) return;
+  try {
+    await api(`/api/farms/${fid}`, { method: "DELETE" });
+    toast("ลบฟาร์มแล้ว");
+    refresh();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+function openShelfModal(fid, sid = null) {
+  shelfFarmId = fid;
+  editShelfId = sid;
+  const s = sid ? shelfById(sid) : null;
+  $("shelf-title").textContent = s ? "แก้ไขชั้นวาง" : "เพิ่มชั้นวาง";
+  $("shelf-name").value = s?.name || "";
+  $("shelf-slots").value = s?.slots || 4;
+  $("modal-shelf").classList.remove("hidden");
+  $("shelf-name").focus();
+}
+
+async function saveShelf() {
+  const name = $("shelf-name").value.trim();
+  const slots = parseInt($("shelf-slots").value) || 0;
+  if (!name || slots < 1) return toast("กรอกชื่อชั้นและจำนวนช่อง (อย่างน้อย 1)", "err");
+  try {
+    if (editShelfId) await postJSON(`/api/shelves/${editShelfId}`, { name, slots }, "PATCH");
+    else await postJSON(`/api/farms/${shelfFarmId}/shelves`, { name, slots });
+    toast("บันทึกชั้นวางแล้ว");
+    closeModals();
+    refresh();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function deleteShelf(sid) {
+  const s = shelfById(sid);
+  if (!confirm(`ลบชั้นวาง "${s?.name || sid}"?\nเครื่องบนชั้นนี้จะหลุดจากผัง (ไม่ถูกลบ)`)) return;
+  try {
+    await api(`/api/shelves/${sid}`, { method: "DELETE" });
+    toast("ลบชั้นวางแล้ว");
+    refresh();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+// ---------- assign printer to slot ----------
+function openAssign(sid, pos) {
+  assignTarget = { sid, pos };
+  const s = shelfById(sid);
+  const f = s ? farmById(s.farm_id) : null;
+  $("assign-target").textContent = `📍 ${f?.name || "?"} · ${s?.name || "?"} · ช่อง ${pos}`;
+  $("assign-printer").innerHTML = `<option value="">— เลือกเครื่อง —</option>` +
+    state.printers.map((p) => {
+      const loc = locationLabel(p);
+      return `<option value="${p.id}">${esc(p.name)}${loc ? ` (${esc(loc)})` : ""}</option>`;
+    }).join("");
+  $("modal-assign").classList.remove("hidden");
+}
+
+async function saveAssign() {
+  const pid = $("assign-printer").value;
+  if (!pid) return toast("เลือกเครื่องพิมพ์ก่อน", "err");
+  try {
+    await postJSON(`/api/printers/${pid}/location`,
+      { shelf_id: assignTarget.sid, position: assignTarget.pos }, "PUT");
+    toast("วางเครื่องลงช่องแล้ว");
+    closeModals();
+    refresh();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+// ---------- printer location (ใน modal เครื่อง) ----------
+function ppInitLocation(p) {
+  let html = `<option value="">— ไม่ระบุตำแหน่ง —</option>`;
+  for (const f of state.farms || []) {
+    if (!(f.shelves || []).length) continue;
+    html += `<optgroup label="${esc(f.name)}">` + f.shelves.map((s) =>
+      `<option value="${s.id}" ${p.shelf_id === s.id ? "selected" : ""}>${esc(s.name)} (${s.slots} ช่อง)</option>`
+    ).join("") + `</optgroup>`;
+  }
+  $("pp-shelf").innerHTML = html;
+  ppShelfChanged(p.position);
+}
+
+function ppShelfChanged(preselect = null) {
+  const sid = $("pp-shelf").value;
+  const posSel = $("pp-pos");
+  const s = sid ? shelfById(sid) : null;
+  if (!s) {
+    posSel.innerHTML = `<option value="">–</option>`;
+    posSel.disabled = true;
+    return;
+  }
+  posSel.disabled = false;
+  const p = state.printers.find((x) => x.id === currentPrinterId);
+  const occupied = new Set(state.printers
+    .filter((x) => x.shelf_id === sid && x.id !== currentPrinterId)
+    .map((x) => x.position));
+  let desired = preselect ?? (p?.shelf_id === sid ? p.position : null);
+  if (desired == null || occupied.has(desired) || desired < 1 || desired > s.slots) {
+    desired = null;
+    for (let i = 1; i <= s.slots; i++) if (!occupied.has(i)) { desired = i; break; }
+  }
+  let html = "";
+  for (let i = 1; i <= s.slots; i++) {
+    const occ = state.printers.find((x) => x.shelf_id === sid && x.position === i && x.id !== currentPrinterId);
+    html += `<option value="${i}" ${occ ? "disabled" : ""} ${i === desired ? "selected" : ""}>ช่อง ${i}${occ ? ` — ${esc(occ.name)}` : ""}</option>`;
+  }
+  posSel.innerHTML = html;
+}
+
+async function ppSaveLocation() {
+  const sid = $("pp-shelf").value || null;
+  const pos = sid ? parseInt($("pp-pos").value) : null;
+  if (sid && !pos) return toast("ชั้นวางนี้ไม่มีช่องว่าง", "err");
+  try {
+    await postJSON(`/api/printers/${currentPrinterId}/location`, { shelf_id: sid, position: pos }, "PUT");
+    toast(sid ? "บันทึกตำแหน่งแล้ว" : "เอาเครื่องออกจากผังแล้ว");
+    refresh();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+function ppUnassign() {
+  $("pp-shelf").value = "";
+  ppShelfChanged();
+  ppSaveLocation();
 }

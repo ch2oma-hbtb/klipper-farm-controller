@@ -18,6 +18,12 @@
 
 <main>
   <section>
+    <h2>ผังฟาร์ม <button class="btn small" onclick="openFarmModal()">＋ สร้างฟาร์ม</button></h2>
+    <div id="farms"></div>
+    <p id="no-farms" class="empty hidden">ยังไม่มีผังฟาร์ม — สร้างฟาร์ม แล้วเพิ่มชั้นวาง เพื่อระบุตำแหน่งเครื่องพิมพ์แต่ละตัว (ฟาร์ม → ชั้นวาง → ช่อง)</p>
+  </section>
+
+  <section>
     <h2>เครื่องพิมพ์ <span id="printer-count" class="badge"></span></h2>
     <div id="printers" class="grid"></div>
     <p id="no-printers" class="empty hidden">ยังไม่มีเครื่องพิมพ์ — กด "ค้นหาเครื่องใน LAN" หรือ "เพิ่มเครื่องพิมพ์" เพื่อเริ่มใช้งาน</p>
@@ -69,6 +75,45 @@
   </div>
 </div>
 
+<!-- modal: farm add/edit -->
+<div id="modal-farm" class="modal hidden">
+  <div class="modal-box">
+    <h3 id="farm-title">สร้างฟาร์ม</h3>
+    <label>ชื่อฟาร์ม <input id="farm-name" placeholder="เช่น โรงงาน A / ห้องพิมพ์ 1"></label>
+    <label>หมายเหตุ <input id="farm-notes" placeholder="สถานที่ / อาคาร ฯลฯ (เว้นว่างได้)"></label>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModals()">ยกเลิก</button>
+      <button class="btn primary" onclick="saveFarm()">บันทึก</button>
+    </div>
+  </div>
+</div>
+
+<!-- modal: shelf add/edit -->
+<div id="modal-shelf" class="modal hidden">
+  <div class="modal-box">
+    <h3 id="shelf-title">เพิ่มชั้นวาง</h3>
+    <label>ชื่อชั้นวาง <input id="shelf-name" placeholder="เช่น ชั้น 1 / Shelf A"></label>
+    <label>จำนวนช่อง (ตำแหน่งเครื่องพิมพ์) <input id="shelf-slots" type="number" value="4" min="1" max="200"></label>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModals()">ยกเลิก</button>
+      <button class="btn primary" onclick="saveShelf()">บันทึก</button>
+    </div>
+  </div>
+</div>
+
+<!-- modal: assign printer to slot -->
+<div id="modal-assign" class="modal hidden">
+  <div class="modal-box">
+    <h3>วางเครื่องพิมพ์ลงช่อง</h3>
+    <p id="assign-target" class="assign-target"></p>
+    <label>เลือกเครื่องพิมพ์ <select id="assign-printer"></select></label>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModals()">ยกเลิก</button>
+      <button class="btn primary" onclick="saveAssign()">วางลงช่องนี้</button>
+    </div>
+  </div>
+</div>
+
 <!-- modal: printer detail -->
 <div id="modal-printer" class="modal hidden">
   <div class="modal-box wide">
@@ -81,6 +126,12 @@
       <button class="btn" onclick="ppAction('firmware_restart')">↻ Firmware Restart</button>
       <button class="btn clear hidden" id="pp-clear" onclick="ppClear()">✔ เอาชิ้นงานออกแล้ว — รับงานต่อ</button>
       <button class="btn danger-outline" onclick="ppDelete()">🗑 ลบเครื่อง</button>
+    </div>
+    <div class="pp-location">
+      <label>📍 ชั้นวาง <select id="pp-shelf" onchange="ppShelfChanged()"></select></label>
+      <label>ช่อง <select id="pp-pos"></select></label>
+      <button class="btn small primary" onclick="ppSaveLocation()">บันทึกตำแหน่ง</button>
+      <button class="btn small" onclick="ppUnassign()">เอาออกจากผัง</button>
     </div>
     <div class="pp-gcode">
       <input id="pp-gcode" placeholder="ส่ง G-code เช่น G28, M104 S0, STATUS" onkeydown="if(event.key==='Enter')ppGcode()">

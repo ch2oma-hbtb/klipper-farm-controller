@@ -97,3 +97,35 @@ tr:last-child td { border-bottom: none; }
   box-shadow: 0 6px 24px rgba(0,0,0,.4); max-width: 90vw; }
 .toast.err { border-color: var(--red); color: var(--red); }
 .toast.ok { border-color: var(--green); }
+
+/* ---------- farm layout (farm -> shelf -> ช่อง) ---------- */
+.farm-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  padding: 14px 16px; margin-bottom: 14px; }
+.farm-head { display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  flex-wrap: wrap; margin-bottom: 4px; }
+.farm-notes { color: var(--muted); font-size: .8rem; }
+.farm-actions, .shelf-actions { display: flex; gap: 6px; }
+.shelf { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
+  margin-top: 10px; background: var(--panel2); }
+.shelf-head { display: flex; justify-content: space-between; align-items: center;
+  font-size: .88rem; margin-bottom: 8px; gap: 8px; }
+.shelf-head small { color: var(--muted); }
+.slots { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.slot { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; cursor: pointer;
+  background: var(--panel); position: relative; min-height: 56px; transition: border-color .15s; }
+.slot:hover { border-color: var(--accent); }
+.slot-num { position: absolute; top: 4px; right: 8px; font-size: .68rem; color: var(--muted); }
+.slot.filled { display: flex; flex-direction: column; gap: 3px; justify-content: center; }
+.slot-name { font-size: .82rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; padding-right: 16px; }
+.slot-name .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+.slot-state { font-size: .7rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slot.empty-slot { border-style: dashed; display: flex; align-items: center; justify-content: center;
+  color: var(--muted); }
+.slot-plus { font-size: .8rem; }
+.small-empty { padding: 14px; margin-top: 10px; }
+.card-loc { font-size: .75rem; color: var(--accent); margin-top: 2px; }
+.pp-location { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 12px; }
+.pp-location label { display: flex; flex-direction: column; gap: 4px; margin: 0; }
+.assign-target { color: var(--accent); font-size: .85rem; margin-bottom: 12px; }
+#assign-printer { width: 100%; margin-top: 4px; }
